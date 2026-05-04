@@ -449,21 +449,6 @@ async function actionUpdateUserProfile({
   };
 }
 
-  await createAdminLog(databases, config, {
-    adminUserId: adminUser.$id,
-    actionType: "update_user",
-    targetUserId,
-    targetEntityId: profile.$id,
-    description: `Администратор обновил профиль пользователя ${getUserDisplayName(
-      targetUser
-    )}`,
-  });
-
-  return {
-    profile: updatedProfile,
-  };
-}
-
 async function actionBlockUser({
   adminUser,
   users,
