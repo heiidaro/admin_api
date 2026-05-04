@@ -776,6 +776,21 @@ async function actionPublishNews({
   };
 }
 
+async function actionListNews({ databases, config }) {
+  const result = await databases.listDocuments({
+    databaseId: config.dbId,
+    collectionId: config.appNewsColId,
+    queries: [
+      Query.orderDesc("$createdAt"),
+      Query.limit(100),
+    ],
+  });
+
+  return {
+    news: result.documents || [],
+  };
+}
+
 async function actionListAdminLogs({ databases, config }) {
   const result = await databases.listDocuments({
     databaseId: config.dbId,
@@ -870,6 +885,14 @@ export default async ({ req, res, log, error }) => {
       });
     } else if (action === "closeSupportTicket") {
       data = await actionCloseSupportTicket({
+        adminUser,
+        users,
+        databases,
+        config,
+        payload,
+      });
+    } else if (action === "listNews") {
+      data = await actionListNews({
         adminUser,
         users,
         databases,
