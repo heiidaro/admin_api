@@ -555,7 +555,7 @@ async function actionUnblockUser({
   };
 }
 
-async function actionListSupportTickets({ databases, config, payload }) {
+async function actionListSupportTickets({ users, databases, config, payload }) {
   const status = payload.status || "all";
 
   const queries = [
@@ -567,14 +567,34 @@ async function actionListSupportTickets({ databases, config, payload }) {
     queries.unshift(Query.equal("status", status));
   }
 
-  const result = await databases.listDocuments({
+  const ticketsResult = await databases.listDocuments({
     databaseId: config.dbId,
     collectionId: config.supportTicketsColId,
     queries,
   });
 
+  const tickets = ticketsResult.documents || [];
+
+  const authUsers = await listAllUsers(users);
+
+  const usersById = new Map();
+
+  authUsers.forEach((user) => {
+    usersById.set(user.$id, user);
+  });
+
+  const enrichedTickets = tickets.map((ticket) => {
+    const user = usersById.get(ticket.userId);
+
+    return {
+      ...ticket,
+      userName: user?.name || "Пользователь",
+      userEmail: user?.email || "Email не найден",
+    };
+  });
+
   return {
-    tickets: result.documents || [],
+    tickets: enrichedTickets,
   };
 }
 
