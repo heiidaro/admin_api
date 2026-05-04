@@ -841,6 +841,47 @@ async function safeListDocuments(databases, databaseId, collectionId, queries = 
   }
 }
 
+async function safeListDocumentsPaged(
+  databases,
+  databaseId,
+  collectionId,
+  baseQueries = [],
+  maxDocuments = 1000
+) {
+  try {
+    const allDocuments = [];
+    const pageLimit = 100;
+
+    let offset = 0;
+
+    while (allDocuments.length < maxDocuments) {
+      const result = await databases.listDocuments({
+        databaseId,
+        collectionId,
+        queries: [
+          ...baseQueries,
+          Query.limit(pageLimit),
+          Query.offset(offset),
+        ],
+      });
+
+      const documents = result.documents || [];
+
+      allDocuments.push(...documents);
+
+      if (documents.length < pageLimit) {
+        break;
+      }
+
+      offset += pageLimit;
+    }
+
+    return allDocuments.slice(0, maxDocuments);
+  } catch {
+    return [];
+  }
+}
+
 async function actionGetUserDetails({ users, databases, config, payload }) {
   const targetUserId = payload.userId;
 
@@ -936,6 +977,179 @@ async function actionGetUserDetails({ users, databases, config, payload }) {
 
     latestTickets: tickets,
     latestAdminLogs: adminLogs,
+  };
+}
+
+function calculateExpenseAmount(expenses) {
+  return expenses.reduce((sum, expense) => {
+    const amount = Number(expense.amount || 0);
+
+    if (Number.isNaN(amount)) {
+      return sum;
+    }
+
+    return sum + amount;
+  }, 0);
+}
+
+function buildUserExportRow(user, profile, expenses, goals, tickets) {
+  const normalizedProfile = normalizeProfile(profile);
+  const isAdmin = isAdminUser(user);
+
+  const openTickets = tickets.filter((ticket) => ticket.status === "open");
+  const inProgressTickets = tickets.filter(
+    (ticket) => ticket.status === "in_progress"
+  );
+  const closedTickets = tickets.filter((ticket) => ticket.status === "closed");
+
+  return {
+    userId: user.$id,
+    name: normalizedProfile?.name || user.name || "",
+    email: normalizedProfile?.email || user.email || "",
+    role: isAdmin ? "admin" : normalizedProfile?.role || "user",
+    isBlocked: !user.status || Boolean(normalizedProfile?.isBlocked),
+    status: Boolean(user.status),
+    onlineStatus: getOnlineStatus(normalizedProfile?.lastSeenAt),
+    lastSeenAt: normalizedProfile?.lastSeenAt || "",
+    lastActivityScreen: normalizedProfile?.lastActivityScreen || "",
+    createdAt: user.$createdAt || "",
+
+    expensesCount: expenses.length,
+    totalExpenseAmount: calculateExpenseAmount(expenses),
+    goalsCount: goals.length,
+    ticketsCount: tickets.length,
+    openTicketsCount: openTickets.length,
+    inProgressTicketsCount: inProgressTickets.length,
+    closedTicketsCount: closedTickets.length,
+  };
+}
+
+async function actionExportUserStats({ users, databases, config, payload }) {
+  const targetUserId = payload.userId;
+
+  if (!targetUserId) {
+    throw new Error("Не передан userId пользователя");
+  }
+
+  const targetUser = await users.get({
+    userId: targetUserId,
+  });
+
+  const profile = await ensureProfileForUser(databases, config, targetUser);
+
+  const [expenses, goals, tickets, adminLogs] = await Promise.all([
+    safeListDocumentsPaged(databases, config.dbId, config.expensesColId, [
+      Query.equal("userId", targetUserId),
+      Query.orderDesc("$createdAt"),
+    ]),
+
+    safeListDocumentsPaged(databases, config.dbId, config.spendingGoalsColId, [
+      Query.equal("userId", targetUserId),
+      Query.orderDesc("$createdAt"),
+    ]),
+
+    safeListDocumentsPaged(databases, config.dbId, config.supportTicketsColId, [
+      Query.equal("userId", targetUserId),
+      Query.orderDesc("$createdAt"),
+    ]),
+
+    safeListDocumentsPaged(databases, config.dbId, config.adminLogsColId, [
+      Query.equal("targetUserId", targetUserId),
+      Query.orderDesc("$createdAt"),
+    ]),
+  ]);
+
+  const summary = buildUserExportRow(
+    targetUser,
+    profile,
+    expenses,
+    goals,
+    tickets
+  );
+
+  return {
+    user: summary,
+    expenses,
+    goals,
+    tickets,
+    adminLogs,
+  };
+}
+
+async function actionExportAllUsersStats({ users, databases, config }) {
+  const [authUsers, profiles, expenses, goals, tickets, adminLogs] =
+    await Promise.all([
+      listAllUsers(users),
+
+      safeListDocumentsPaged(databases, config.dbId, config.profilesColId, [
+        Query.orderDesc("$createdAt"),
+      ]),
+
+      safeListDocumentsPaged(databases, config.dbId, config.expensesColId, [
+        Query.orderDesc("$createdAt"),
+      ]),
+
+      safeListDocumentsPaged(
+        databases,
+        config.dbId,
+        config.spendingGoalsColId,
+        [Query.orderDesc("$createdAt")]
+      ),
+
+      safeListDocumentsPaged(
+        databases,
+        config.dbId,
+        config.supportTicketsColId,
+        [Query.orderDesc("$createdAt")]
+      ),
+
+      safeListDocumentsPaged(databases, config.dbId, config.adminLogsColId, [
+        Query.orderDesc("$createdAt"),
+      ]),
+    ]);
+
+  const profilesByUserId = new Map();
+
+  profiles.forEach((profile) => {
+    if (profile.userId) {
+      profilesByUserId.set(profile.userId, profile);
+    }
+  });
+
+  const usersRows = authUsers.map((user) => {
+    const userExpenses = expenses.filter((item) => item.userId === user.$id);
+    const userGoals = goals.filter((item) => item.userId === user.$id);
+    const userTickets = tickets.filter((item) => item.userId === user.$id);
+
+    return buildUserExportRow(
+      user,
+      profilesByUserId.get(user.$id),
+      userExpenses,
+      userGoals,
+      userTickets
+    );
+  });
+
+  const usersById = new Map();
+
+  authUsers.forEach((user) => {
+    usersById.set(user.$id, user);
+  });
+
+  const enrichedTickets = tickets.map((ticket) => {
+    const user = usersById.get(ticket.userId);
+
+    return {
+      ...ticket,
+      userName: user?.name || "Пользователь",
+      userEmail: user?.email || "Email не найден",
+    };
+  });
+
+  return {
+    users: usersRows,
+    tickets: enrichedTickets,
+    adminLogs,
   };
 }
 
@@ -1064,6 +1278,22 @@ export default async ({ req, res, log, error }) => {
       data = await actionListUsers({ users, databases, config, payload });
     } else if (action === "getUserDetails") {
       data = await actionGetUserDetails({
+        adminUser,
+        users,
+        databases,
+        config,
+        payload,
+      });
+    } else if (action === "exportUserStats") {
+      data = await actionExportUserStats({
+        adminUser,
+        users,
+        databases,
+        config,
+        payload,
+      });
+    } else if (action === "exportAllUsersStats") {
+      data = await actionExportAllUsersStats({
         adminUser,
         users,
         databases,
