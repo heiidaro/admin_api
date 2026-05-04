@@ -809,8 +809,24 @@ async function actionListNews({ databases, config }) {
   };
 }
 
-async function actionListAdminLogs({ databases, config }) {
-  const result = await databases.listDocuments({
+async function safeGetDocument(databases, databaseId, collectionId, documentId) {
+  try {
+    if (!documentId) {
+      return null;
+    }
+
+    return await databases.getDocument({
+      databaseId,
+      collectionId,
+      documentId,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function actionListAdminLogs({ users, databases, config }) {
+  const logsResult = await databases.listDocuments({
     databaseId: config.dbId,
     collectionId: config.adminLogsColId,
     queries: [
@@ -819,8 +835,86 @@ async function actionListAdminLogs({ databases, config }) {
     ],
   });
 
+  const logs = logsResult.documents || [];
+  const authUsers = await listAllUsers(users);
+
+  const usersById = new Map();
+
+  authUsers.forEach((user) => {
+    usersById.set(user.$id, user);
+  });
+
+  const enrichedLogs = [];
+
+  for (const logItem of logs) {
+    const adminUser = usersById.get(logItem.adminUserId);
+    const targetUser = logItem.targetUserId
+      ? usersById.get(logItem.targetUserId)
+      : null;
+
+    let targetEntityTitle = "";
+    let targetEntityType = "";
+
+    if (
+      logItem.actionType === "reply_ticket" ||
+      logItem.actionType === "close_ticket"
+    ) {
+      const ticket = await safeGetDocument(
+        databases,
+        config.dbId,
+        config.supportTicketsColId,
+        logItem.targetEntityId
+      );
+
+      if (ticket) {
+        targetEntityType = "Обращение";
+        targetEntityTitle = ticket.title || "Обращение без темы";
+      }
+    }
+
+    if (logItem.actionType === "publish_news") {
+      const news = await safeGetDocument(
+        databases,
+        config.dbId,
+        config.appNewsColId,
+        logItem.targetEntityId
+      );
+
+      if (news) {
+        targetEntityType = "Новость";
+        targetEntityTitle = news.title || "Новость без заголовка";
+      }
+    }
+
+    if (
+      logItem.actionType === "update_user" ||
+      logItem.actionType === "block_user" ||
+      logItem.actionType === "unblock_user"
+    ) {
+      targetEntityType = "Профиль пользователя";
+
+      if (targetUser) {
+        targetEntityTitle =
+          targetUser.name || targetUser.email || "Пользователь";
+      }
+    }
+
+    enrichedLogs.push({
+      ...logItem,
+
+      adminName: adminUser?.name || "Администратор",
+      adminEmail: adminUser?.email || "Email администратора не найден",
+
+      targetUserName: targetUser?.name || "",
+      targetUserEmail: targetUser?.email || "",
+
+      targetEntityType,
+      targetEntityTitle,
+    });
+  }
+
   return {
-    logs: result.documents || [],
+    logs: enrichedLogs,
   };
 }
 
