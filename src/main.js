@@ -69,6 +69,11 @@ function getOnlineStatus(lastSeenAt) {
   }
 
   const diffMs = Date.now() - lastSeenTime;
+
+  if (diffMs < 0) {
+    return "offline";
+  }
+
   const diffMinutes = diffMs / 1000 / 60;
 
   if (diffMinutes <= 2) {
