@@ -35,6 +35,18 @@ function isAdminUser(user) {
   return labels.includes("admin");
 }
 
+function isAdminProfile(profile) {
+  return String(profile?.role || "").toLowerCase() === "admin";
+}
+
+function assertTargetIsNotAdmin(targetUser, targetProfile) {
+  if (isAdminUser(targetUser) || isAdminProfile(targetProfile)) {
+    const error = new Error("Нельзя изменять или блокировать администратора");
+    error.statusCode = 403;
+    throw error;
+  }
+}
+
 function getUserDisplayName(user) {
   return user?.name || user?.email || "Пользователь";
 }
@@ -278,8 +290,8 @@ async function actionListUsers({ users, databases, config }) {
 
     result.push({
       userId: user.$id,
-      name: user.name || normalizedProfile?.name || "",
-      email: user.email || normalizedProfile?.email || "",
+      name: normalizedProfile?.name || user.name || "",
+      email: normalizedProfile?.email || user.email || "",
       phone: user.phone || "",
       status: Boolean(user.status),
       emailVerification: Boolean(user.emailVerification),
@@ -364,10 +376,24 @@ async function actionUpdateUserProfile({
 }) {
   const targetUserId = payload.userId;
   const name = String(payload.name || "").trim();
+  const email = String(payload.email || "").trim();
+  const password = String(payload.password || "").trim();
   const role = String(payload.role || "user").trim();
 
   if (!targetUserId) {
     throw new Error("Не передан userId пользователя");
+  }
+
+  if (!name) {
+    throw new Error("Введите имя пользователя");
+  }
+
+  if (!email) {
+    throw new Error("Введите email пользователя");
+  }
+
+  if (password && password.length < 8) {
+    throw new Error("Пароль должен быть не короче 8 символов");
   }
 
   const targetUser = await users.get({
@@ -376,16 +402,52 @@ async function actionUpdateUserProfile({
 
   const profile = await ensureProfileForUser(databases, config, targetUser);
 
+  assertTargetIsNotAdmin(targetUser, profile);
+
+  if (targetUser.name !== name) {
+    await users.updateName({
+      userId: targetUserId,
+      name,
+    });
+  }
+
+  if (targetUser.email !== email) {
+    await users.updateEmail({
+      userId: targetUserId,
+      email,
+    });
+  }
+
+  if (password) {
+    await users.updatePassword({
+      userId: targetUserId,
+      password,
+    });
+  }
+
   const updatedProfile = await databases.updateDocument({
     databaseId: config.dbId,
     collectionId: config.profilesColId,
     documentId: profile.$id,
     data: {
-      name: name || targetUser.name || "",
-      email: targetUser.email || "",
+      name,
+      email,
       role: role === "admin" ? "admin" : "user",
     },
   });
+
+  await createAdminLog(databases, config, {
+    adminUserId: adminUser.$id,
+    actionType: "update_user",
+    targetUserId,
+    targetEntityId: profile.$id,
+    description: `Администратор обновил данные пользователя ${email}`,
+  });
+
+  return {
+    profile: updatedProfile,
+  };
+}
 
   await createAdminLog(databases, config, {
     adminUserId: adminUser.$id,
@@ -424,6 +486,8 @@ async function actionBlockUser({
   });
 
   const profile = await ensureProfileForUser(databases, config, targetUser);
+
+  assertTargetIsNotAdmin(targetUser, profile);
 
   await users.updateStatus({
     userId: targetUserId,
@@ -473,6 +537,8 @@ async function actionUnblockUser({
   });
 
   const profile = await ensureProfileForUser(databases, config, targetUser);
+
+  assertTargetIsNotAdmin(targetUser, profile);
 
   await users.updateStatus({
     userId: targetUserId,
