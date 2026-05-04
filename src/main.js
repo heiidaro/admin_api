@@ -128,6 +128,8 @@ function getConfig() {
     notificationsColId: getEnv("NOTIFICATIONS_COL_ID", "notifications"),
     adminLogsColId: getEnv("ADMIN_LOGS_COL_ID", "admin_logs"),
     appNewsColId: getEnv("APP_NEWS_COL_ID", "app_news"),
+    expensesColId: getEnv("EXPENSES_COL_ID", "expenses"),
+    spendingGoalsColId: getEnv("SPENDING_GOALS_COL_ID", "spending_goals"),
   };
 }
 
@@ -825,6 +827,118 @@ async function safeGetDocument(databases, databaseId, collectionId, documentId) 
   }
 }
 
+async function safeListDocuments(databases, databaseId, collectionId, queries = []) {
+  try {
+    const result = await databases.listDocuments({
+      databaseId,
+      collectionId,
+      queries,
+    });
+
+    return result.documents || [];
+  } catch {
+    return [];
+  }
+}
+
+async function actionGetUserDetails({ users, databases, config, payload }) {
+  const targetUserId = payload.userId;
+
+  if (!targetUserId) {
+    throw new Error("Не передан userId пользователя");
+  }
+
+  const targetUser = await users.get({
+    userId: targetUserId,
+  });
+
+  const profile = await ensureProfileForUser(databases, config, targetUser);
+  const normalizedProfile = normalizeProfile(profile);
+
+  const [
+    expenses,
+    goals,
+    tickets,
+    adminLogs,
+  ] = await Promise.all([
+    safeListDocuments(databases, config.dbId, config.expensesColId, [
+      Query.equal("userId", targetUserId),
+      Query.orderDesc("$createdAt"),
+      Query.limit(100),
+    ]),
+
+    safeListDocuments(databases, config.dbId, config.spendingGoalsColId, [
+      Query.equal("userId", targetUserId),
+      Query.orderDesc("$createdAt"),
+      Query.limit(100),
+    ]),
+
+    safeListDocuments(databases, config.dbId, config.supportTicketsColId, [
+      Query.equal("userId", targetUserId),
+      Query.orderDesc("$createdAt"),
+      Query.limit(10),
+    ]),
+
+    safeListDocuments(databases, config.dbId, config.adminLogsColId, [
+      Query.equal("targetUserId", targetUserId),
+      Query.orderDesc("$createdAt"),
+      Query.limit(10),
+    ]),
+  ]);
+
+  const totalExpenseAmount = expenses.reduce((sum, expense) => {
+    const amount = Number(expense.amount || 0);
+
+    if (Number.isNaN(amount)) {
+      return sum;
+    }
+
+    return sum + amount;
+  }, 0);
+
+  const openTickets = tickets.filter((ticket) => ticket.status === "open");
+  const inProgressTickets = tickets.filter(
+    (ticket) => ticket.status === "in_progress"
+  );
+  const closedTickets = tickets.filter((ticket) => ticket.status === "closed");
+
+  return {
+    user: {
+      userId: targetUser.$id,
+      name: normalizedProfile?.name || targetUser.name || "",
+      email: normalizedProfile?.email || targetUser.email || "",
+      phone: targetUser.phone || "",
+      status: Boolean(targetUser.status),
+      emailVerification: Boolean(targetUser.emailVerification),
+      labels: targetUser.labels || [],
+      createdAt: targetUser.$createdAt || "",
+      updatedAt: targetUser.$updatedAt || "",
+
+      profileId: normalizedProfile?.profileId || "",
+      role: isAdminUser(targetUser) ? "admin" : normalizedProfile?.role || "user",
+      isBlocked: !targetUser.status || Boolean(normalizedProfile?.isBlocked),
+      lastSeenAt: normalizedProfile?.lastSeenAt || "",
+      lastActivityAt: normalizedProfile?.lastActivityAt || "",
+      lastActivityScreen: normalizedProfile?.lastActivityScreen || "",
+      onlineStatus: getOnlineStatus(normalizedProfile?.lastSeenAt),
+    },
+
+    stats: {
+      expensesCount: expenses.length,
+      totalExpenseAmount,
+      goalsCount: goals.length,
+      ticketsCount: tickets.length,
+      openTicketsCount: openTickets.length,
+      inProgressTicketsCount: inProgressTickets.length,
+      closedTicketsCount: closedTickets.length,
+      adminLogsCount: adminLogs.length,
+    },
+
+    latestTickets: tickets,
+    latestAdminLogs: adminLogs,
+  };
+}
+
 async function actionListAdminLogs({ users, databases, config }) {
   const logsResult = await databases.listDocuments({
     databaseId: config.dbId,
@@ -948,6 +1062,14 @@ export default async ({ req, res, log, error }) => {
       data = await actionGetMeAdminStatus({ adminUser });
     } else if (action === "listUsers") {
       data = await actionListUsers({ users, databases, config, payload });
+    } else if (action === "getUserDetails") {
+      data = await actionGetUserDetails({
+        adminUser,
+        users,
+        databases,
+        config,
+        payload,
+      });
     } else if (action === "getDashboardStats") {
       data = await actionGetDashboardStats({
         users,
