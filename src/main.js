@@ -948,7 +948,7 @@ export default async ({ req, res, log, error }) => {
       action,
       data,
     });
-  }   } catch (err) {
+  } catch (err) {
     const statusCode = err?.statusCode || err?.code || 500;
 
     const errorDetails = {
