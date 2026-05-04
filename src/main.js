@@ -970,3 +970,4 @@ export default async ({ req, res, log, error }) => {
       statusCode
     );
   }
+};
