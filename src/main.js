@@ -717,7 +717,10 @@ async function actionPublishNews({
 }) {
   const title = String(payload.title || "").trim();
   const message = String(payload.message || "").trim();
-  const type = String(payload.type || "news").trim();
+  const rawType = String(payload.type || "news").trim();
+
+  const allowedTypes = ["news", "system", "update"];
+  const type = allowedTypes.includes(rawType) ? rawType : "news";
 
   if (!title) {
     throw new Error("Введите заголовок новости");
@@ -727,13 +730,17 @@ async function actionPublishNews({
     throw new Error("Введите текст новости");
   }
 
+  const safeTitle = title.slice(0, 250);
+  const safeMessage = message.slice(0, 3900);
+  const notificationMessage = message.slice(0, 1900);
+
   const news = await databases.createDocument({
     databaseId: config.dbId,
     collectionId: config.appNewsColId,
     documentId: ID.unique(),
     data: {
-      title,
-      message,
+      title: safeTitle,
+      message: safeMessage,
       type,
       isPublished: true,
       publishedAt: nowIso(),
@@ -743,36 +750,47 @@ async function actionPublishNews({
 
   const authUsers = await listAllUsers(users);
 
-  await Promise.all(
-    authUsers
-      .filter((user) => Boolean(user.status))
-      .map((user) => {
-        return databases.createDocument({
-          databaseId: config.dbId,
-          collectionId: config.notificationsColId,
-          documentId: ID.unique(),
-          data: {
-            userId: user.$id,
-            title,
-            message,
-            type: "news",
-            isRead: false,
-            relatedEntityId: news.$id,
-            relatedEntityType: "news",
-          },
-        });
-      })
-  );
+  const notificationErrors = [];
+
+  for (const user of authUsers) {
+    if (!user.status) {
+      continue;
+    }
+
+    try {
+      await databases.createDocument({
+        databaseId: config.dbId,
+        collectionId: config.notificationsColId,
+        documentId: ID.unique(),
+        data: {
+          userId: user.$id,
+          title: safeTitle,
+          message: notificationMessage,
+          type: "news",
+          isRead: false,
+          relatedEntityId: news.$id,
+          relatedEntityType: "news",
+        },
+      });
+    } catch (notificationError) {
+      notificationErrors.push({
+        userId: user.$id,
+        email: user.email,
+        message: notificationError?.message || String(notificationError),
+      });
+    }
+  }
 
   await createAdminLog(databases, config, {
     adminUserId: adminUser.$id,
     actionType: "publish_news",
     targetEntityId: news.$id,
-    description: `Администратор опубликовал новость "${title}"`,
+    description: `Администратор опубликовал новость "${safeTitle}"`,
   });
 
   return {
     news,
+    notificationErrors,
   };
 }
 
@@ -930,17 +948,25 @@ export default async ({ req, res, log, error }) => {
       action,
       data,
     });
-  } catch (err) {
-    const statusCode = err?.statusCode || 500;
+  }   } catch (err) {
+    const statusCode = err?.statusCode || err?.code || 500;
 
-    error(err?.message || String(err));
+    const errorDetails = {
+      message: err?.message || String(err),
+      code: err?.code || null,
+      type: err?.type || null,
+      response: err?.response || null,
+      stack: err?.stack || null,
+    };
+
+    error(JSON.stringify(errorDetails, null, 2));
 
     return res.json(
       {
         success: false,
         message: err?.message || "Ошибка выполнения admin_api",
+        details: errorDetails,
       },
       statusCode
     );
   }
-};
